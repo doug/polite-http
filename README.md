@@ -1,0 +1,120 @@
+# polite-http
+
+[![CI](https://github.com/doug/polite-http/actions/workflows/ci.yml/badge.svg)](https://github.com/doug/polite-http/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/polite-http.svg)](https://pypi.org/project/polite-http/)
+[![Python versions](https://img.shields.io/pypi/pyversions/polite-http.svg)](https://pypi.org/project/polite-http/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
+A courteous, **dependency-free** HTTP client for Python. It plays nice with
+rate-limited APIs out of the box:
+
+- **Per-host rate limiting** — cross-process, via a shared file lock.
+- **Automatic retries** on transient errors (HTTP 429, 5xx) and network errors.
+- **Exponential backoff** with optional jitter.
+- **`Retry-After`** support (server-directed backoff, both seconds and
+  HTTP-date forms).
+- **`X-Throttling-Control`** proactive backpressure (as used by PubChem / NCBI).
+- **Streaming** helpers for large line-oriented and binary responses.
+- **Zero third-party dependencies** — built entirely on the standard library
+  (`urllib.request`).
+
+## Installation
+
+```bash
+pip install polite-http
+```
+
+Requires Python 3.9+. The cross-process file lock uses `fcntl` (available on
+Linux and macOS); on platforms without it the client still works, falling back
+to an in-process rate-limit timer.
+
+## Quick start
+
+```python
+from polite_http import HttpClient
+
+# Scope a client to a base URL and a steady-state rate of 3 requests/second.
+client = HttpClient("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/", qps=3)
+
+# GET + parse JSON (relative paths are resolved against the base URL).
+data = client.fetch_json("esummary.fcgi?db=pubmed&id=123456")
+
+# POST a JSON body.
+result = client.fetch_json(
+    "esearch.fcgi",
+    method="POST",
+    json_body={"db": "pubmed", "term": "cancer"},
+)
+
+# Download raw bytes with a custom timeout.
+pdf = client.fetch_bytes(
+    "efetch.fcgi?db=pubmed&id=123456&rettype=abstract",
+    timeout=60,
+)
+```
+
+## Streaming
+
+```python
+# Stream a large response line-by-line without buffering it all in memory.
+for line in client.stream_lines("large-export.tsv"):
+    process(line)
+
+# Stream binary content in chunks (e.g. to a file).
+with open("paper.pdf", "wb") as f:
+    for chunk in client.stream_bytes("paper.pdf"):
+        f.write(chunk)
+```
+
+## Configuration
+
+`HttpClient` accepts the following keyword arguments:
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `qps` | _required_ | Maximum queries per second (steady state). |
+| `default_headers` | `None` | Headers added to every request. |
+| `max_retries` | `7` | Retry attempts for transient errors (total attempts = `max_retries + 1`). |
+| `timeout` | `60.0` | Per-request timeout in seconds. |
+| `backoff_base` | `3.0` | Base delay for exponential backoff. |
+| `backoff_max` | `180.0` | Cap on backoff delay. |
+| `jitter` | `0.5` | Max uniform random jitter added to each backoff. |
+| `user_agent` | env / `""` | `User-Agent` header; falls back to `POLITE_HTTP_USER_AGENT`. |
+| `retryable_status_codes` | `{429, 500, 502, 503, 504}` | Status codes that trigger a retry. |
+| `referer` | `None` | Optional `Referer` header sent with every request. |
+
+### Environment variables
+
+- `POLITE_HTTP_USER_AGENT` — default `User-Agent` when one isn't passed
+  explicitly. Many APIs (e.g. NCBI) reject requests without a descriptive
+  User-Agent, so setting this is recommended.
+- `POLITE_HTTP_LOCK_DIR` — directory for the cross-process rate-limit lock
+  files (defaults to the system temp directory).
+
+## Error handling
+
+Failed requests raise `HttpError`, which carries the `status_code`, raw `body`
+bytes, and `url`:
+
+```python
+from polite_http import HttpClient, HttpError
+
+client = HttpClient("https://api.example.com/", qps=5)
+try:
+    data = client.fetch_json("widgets/42")
+except HttpError as exc:
+    print(exc.status_code, exc.url)
+    if exc.body:
+        print(exc.json())  # parse the error body as JSON, if applicable
+```
+
+## Acknowledgements
+
+The HTTP client at the heart of this package is derived from the
+[`science-skills`](https://github.com/google-deepmind/science-skills) project by
+Google DeepMind, used under the Apache License 2.0. See [`NOTICE`](NOTICE) for
+details of the changes.
+
+## License
+
+[Apache License 2.0](LICENSE).
