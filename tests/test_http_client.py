@@ -23,6 +23,7 @@ from __future__ import annotations
 import gzip
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -289,3 +290,27 @@ def test_rate_limiter_lock_dir(tmp_path, monkeypatch):
     limiter = _RateLimiter("example.com", qps=1000)
     limiter.wait()
     assert any(tmp_path.iterdir())
+
+
+def test_rate_limiter_shares_state_across_instances(tmp_path, monkeypatch):
+    # Two limiters for the same host (as two processes would have) must
+    # coordinate through the shared lock file: the second call sees the first
+    # one's timestamp and waits out the interval.  Exercises the real
+    # file-locking path (fcntl on POSIX, msvcrt on Windows).
+    monkeypatch.setenv("POLITE_HTTP_LOCK_DIR", str(tmp_path))
+    qps = 20.0  # 50ms minimum interval.
+    first = _RateLimiter("shared.example.com", qps=qps)
+    second = _RateLimiter("shared.example.com", qps=qps)
+
+    first.wait()
+    start = time.monotonic()
+    second.wait()
+    elapsed = time.monotonic() - start
+
+    # Allow generous slack for slow CI, but require a real, non-trivial delay.
+    assert elapsed >= (1.0 / qps) * 0.5
+
+
+def test_rate_limiter_rejects_non_positive_qps():
+    with pytest.raises(ValueError):
+        _RateLimiter("example.com", qps=0)

@@ -24,9 +24,10 @@ rate-limited APIs out of the box:
 pip install polite-http
 ```
 
-Requires Python 3.9+. The cross-process file lock uses `fcntl` (available on
-Linux and macOS); on platforms without it the client still works, falling back
-to an in-process rate-limit timer.
+Requires Python 3.9+. Cross-process rate limiting works on Linux, macOS, and
+Windows — it uses `fcntl` on POSIX and `msvcrt` on Windows for the shared file
+lock (both standard library). On the rare platform that provides neither, it
+falls back to a best-effort in-process timer.
 
 ## Quick start
 

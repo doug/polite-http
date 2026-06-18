@@ -71,6 +71,7 @@ import logging
 import os
 import random
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -78,10 +79,42 @@ import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows fallback
-    fcntl = None  # type: ignore[assignment]
+# Cross-process exclusive file locking, implemented on the standard library
+# only.  POSIX uses ``fcntl.flock``; Windows uses ``msvcrt.locking`` (byte-range
+# lock).  If neither is available (rare sandboxed runtimes), the limiter falls
+# back to a best-effort in-process timer.
+if sys.platform == "win32":  # pragma: no cover - exercised only on Windows
+    import msvcrt
+
+    def _lock(f) -> None:
+        # Lock one byte at offset 0 as a whole-file mutex.  ``LK_LOCK`` blocks,
+        # retrying for ~10s per call before raising, so loop until acquired.
+        f.seek(0)
+        while True:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                continue
+
+    def _unlock(f) -> None:
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+    _HAS_FILE_LOCK = True
+else:
+    try:
+        import fcntl
+
+        def _lock(f) -> None:
+            fcntl.flock(f, fcntl.LOCK_EX)
+
+        def _unlock(f) -> None:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+        _HAS_FILE_LOCK = True
+    except ImportError:  # pragma: no cover - rare sandboxed runtimes
+        _HAS_FILE_LOCK = False
 
 __all__ = [
     "HttpClient",
@@ -126,10 +159,13 @@ class _RateLimiter:
 
     Uses a shared lock file so multiple processes respect the same rate limit
     (the lock file path is derived from the hostname, e.g.
-    ``/tmp/polite-http-ncbi.nlm.nih.gov.lock``).
+    ``/tmp/polite-http-ncbi.nlm.nih.gov.lock``).  The cross-process lock works
+    on POSIX (``fcntl``) and Windows (``msvcrt``).  On the rare platform that
+    provides neither, it falls back to a best-effort, in-process timer.
 
-    On platforms without ``fcntl`` (e.g. Windows) the cross-process file lock is
-    unavailable and rate limiting falls back to a best-effort, in-process timer.
+    The shared timestamp is `time.monotonic()`, whose clock is system-wide on
+    every supported platform, so the value is comparable across processes on
+    the same host.
 
     Example:
       limiter = _RateLimiter('ncbi.nlm.nih.gov', qps=10)
@@ -146,7 +182,7 @@ class _RateLimiter:
             raise ValueError(f"qps must be positive, got {qps!r}")
         self._min_interval = 1.0 / qps
         self._lock_file = os.path.join(_lock_dir(), f"{PROJECT_NAME}-{hostname}.lock")
-        # Used only when fcntl is unavailable.
+        # Used only when no cross-process file lock is available.
         self._last_ts = 0.0
 
     def wait(self, min_sleep: float = 0.0):
@@ -157,7 +193,7 @@ class _RateLimiter:
             `max(rate_limit_gap, min_sleep)`, which lets callers fold retry back-off
             into the same call.
         """
-        if fcntl is None:  # pragma: no cover - Windows fallback
+        if not _HAS_FILE_LOCK:  # pragma: no cover - rare sandboxed runtimes
             now = time.monotonic()
             gap = self._min_interval - (now - self._last_ts)
             delay = max(gap, min_sleep)
@@ -166,8 +202,12 @@ class _RateLimiter:
             self._last_ts = time.monotonic()
             return
 
-        with open(self._lock_file, "a+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+        # Open read/write in binary mode (no append semantics) so the same
+        # seek/truncate/byte-lock logic behaves identically on POSIX and
+        # Windows.  ``O_CREAT`` makes the first caller create the lock file.
+        fd = os.open(self._lock_file, os.O_RDWR | os.O_CREAT, 0o644)
+        with os.fdopen(fd, "r+b") as f:
+            _lock(f)
             try:
                 f.seek(0)
                 content = f.read().strip()
@@ -179,10 +219,10 @@ class _RateLimiter:
                     time.sleep(delay)
                 f.seek(0)
                 f.truncate()
-                f.write(str(time.monotonic()))
+                f.write(str(time.monotonic()).encode("ascii"))
                 f.flush()
             finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                _unlock(f)
 
 
 def _lock_dir() -> str:

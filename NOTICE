@@ -18,9 +18,9 @@ Modifications made by the polite-http contributors include:
     `polite_http.USER_AGENT_ENV_VAR`).
   * Replaced the science-skills-specific `referer_skill` parameter and Referer
     template with a generic `referer` string parameter.
-  * Made the cross-process file lock optional so the client imports and runs on
-    platforms without `fcntl` (e.g. Windows), falling back to an in-process
-    rate-limit timer.
+  * Added cross-platform cross-process locking: `fcntl` on POSIX and `msvcrt`
+    on Windows, with a best-effort in-process timer fallback on the rare
+    platform that provides neither (still standard-library only).
   * Made the rate-limit lock directory configurable via the
     "POLITE_HTTP_LOCK_DIR" environment variable (defaulting to the system temp
     directory).

@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fetch`, `fetch_json`, `fetch_bytes`, `fetch_text`, `stream_lines`, and
   `stream_bytes` request helpers.
 - `HttpError` and `HttpResponse` result types.
-- Optional `fcntl` so the package imports and runs on platforms without it.
+- Cross-platform cross-process locking: `fcntl` on POSIX, `msvcrt` on Windows,
+  with a best-effort in-process timer fallback where neither is available.
 - Configurable lock directory via `POLITE_HTTP_LOCK_DIR`.
 
 Derived from the `http_client.py` module in
