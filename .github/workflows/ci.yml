@@ -32,11 +32,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
-      - name: Install project
-        run: uv pip install --system -e ".[dev]"
-
       - name: Run tests
-        run: pytest -q --cov=polite_http --cov-report=term-missing
+        run: uv run --extra dev pytest -q --cov=polite_http --cov-report=term-missing
 
   lint:
     name: lint & type-check
@@ -50,20 +47,17 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      - name: Install project
-        run: uv pip install --system -e ".[dev]"
-
       - name: Ruff (lint)
-        run: ruff check .
+        run: uv run --extra dev ruff check .
 
       - name: Ruff (format check)
-        run: ruff format --check .
+        run: uv run --extra dev ruff format --check .
 
       - name: Mypy (POSIX)
-        run: mypy
+        run: uv run --extra dev mypy
 
       - name: Mypy (Windows platform)
-        run: mypy --platform win32
+        run: uv run --extra dev mypy --platform win32
 
   build:
     name: build distribution
