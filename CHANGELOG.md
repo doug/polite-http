@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Rate limiter no longer sleeps while holding the cross-process file lock.
+  The lock file now stores a reservation for the next request slot, so
+  processes backing off after a 429 (or `X-Throttling-Control`) sleep
+  concurrently instead of queueing behind one another and stacking their
+  delays end to end. A back-off still pauses other processes for the same
+  host until it elapses.
+
 ## [0.1.0] - 2026-06-16
 
 ### Added

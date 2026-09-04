@@ -163,9 +163,18 @@ class _RateLimiter:
     on POSIX (``fcntl``) and Windows (``msvcrt``).  On the rare platform that
     provides neither, it falls back to a best-effort, in-process timer.
 
-    The shared timestamp is `time.monotonic()`, whose clock is system-wide on
-    every supported platform, so the value is comparable across processes on
-    the same host.
+    The lock file holds a *reservation*: the `time.monotonic()` value of the
+    most recently granted request slot.  A caller takes the lock only long
+    enough to read that value, compute its own slot, and write it back; the
+    actual sleep happens *after* the lock is released.  This matters for retry
+    back-off: several processes that all received a 429 sleep their back-off
+    concurrently rather than queueing behind one another on the lock and
+    stacking their delays end to end.  Because a back-off is written into the
+    shared reservation, it also pauses the other processes for that host,
+    which is what a server asking for `Retry-After` wants.
+
+    `time.monotonic()` is system-wide on every supported platform, so the
+    value is comparable across processes on the same host.
 
     Example:
       limiter = _RateLimiter('ncbi.nlm.nih.gov', qps=10)
@@ -183,7 +192,7 @@ class _RateLimiter:
         self._min_interval = 1.0 / qps
         self._lock_file = os.path.join(_lock_dir(), f"{PROJECT_NAME}-{hostname}.lock")
         # Used only when no cross-process file lock is available.
-        self._last_ts = 0.0
+        self._last_slot = 0.0
 
     def wait(self, min_sleep: float = 0.0):
         """Block until the next request is allowed.
@@ -194,12 +203,9 @@ class _RateLimiter:
             into the same call.
         """
         if not _HAS_FILE_LOCK:  # pragma: no cover - rare sandboxed runtimes
-            now = time.monotonic()
-            gap = self._min_interval - (now - self._last_ts)
-            delay = max(gap, min_sleep)
-            if delay > 0:
-                time.sleep(delay)
-            self._last_ts = time.monotonic()
+            slot = self._reserve(self._last_slot, min_sleep)
+            self._last_slot = slot
+            self._sleep_until(slot)
             return
 
         # Open read/write in binary mode (no append semantics) so the same
@@ -211,18 +217,32 @@ class _RateLimiter:
             try:
                 f.seek(0)
                 content = f.read().strip()
-                last_ts = float(content) if content else 0.0
-                now = time.monotonic()
-                gap = self._min_interval - (now - last_ts)
-                delay = max(gap, min_sleep)
-                if delay > 0:
-                    time.sleep(delay)
+                last_slot = float(content) if content else 0.0
+                slot = self._reserve(last_slot, min_sleep)
                 f.seek(0)
                 f.truncate()
-                f.write(str(time.monotonic()).encode("ascii"))
+                f.write(repr(slot).encode("ascii"))
                 f.flush()
             finally:
                 _unlock(f)
+        # Sleep with the lock released so other callers can take their own
+        # reservations (and sleep) concurrently.
+        self._sleep_until(slot)
+
+    def _reserve(self, last_slot: float, min_sleep: float) -> float:
+        """Return the monotonic time of the next request slot.
+
+        The slot is the later of the rate-limit gap after `last_slot` and
+        `min_sleep` from now, i.e. `now + max(rate_limit_gap, min_sleep)`.
+        """
+        now = time.monotonic()
+        return max(last_slot + self._min_interval, now + min_sleep, now)
+
+    @staticmethod
+    def _sleep_until(slot: float) -> None:
+        delay = slot - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
 
 
 def _lock_dir() -> str:

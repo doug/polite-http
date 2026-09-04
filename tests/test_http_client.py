@@ -311,6 +311,53 @@ def test_rate_limiter_shares_state_across_instances(tmp_path, monkeypatch):
     assert elapsed >= (1.0 / qps) * 0.5
 
 
+def test_rate_limiter_backoffs_overlap_instead_of_stacking(tmp_path, monkeypatch):
+    # Two processes that both received a 429 must sleep their back-off
+    # concurrently.  If the sleep happened while holding the file lock, the
+    # second caller would queue behind the first and the delays would add up.
+    monkeypatch.setenv("POLITE_HTTP_LOCK_DIR", str(tmp_path))
+    backoff = 0.4
+    limiters = [_RateLimiter("backoff.example.com", qps=1000) for _ in range(2)]
+
+    def run(limiter):
+        limiter.wait(min_sleep=backoff)
+
+    threads = [threading.Thread(target=run, args=(lim,)) for lim in limiters]
+    start = time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= backoff
+    # Serial stacking would take >= 2 * backoff; leave slack for slow CI.
+    assert elapsed < backoff * 1.75
+
+
+def test_rate_limiter_backoff_pauses_other_callers(tmp_path, monkeypatch):
+    # A back-off is written into the shared reservation, so a caller that did
+    # *not* receive a 429 still waits for the host's back-off to elapse.
+    monkeypatch.setenv("POLITE_HTTP_LOCK_DIR", str(tmp_path))
+    backoff = 0.3
+    first = _RateLimiter("pause.example.com", qps=1000)
+    second = _RateLimiter("pause.example.com", qps=1000)
+
+    def run():
+        first.wait(min_sleep=backoff)
+
+    t = threading.Thread(target=run)
+    start = time.monotonic()
+    t.start()
+    # Give the first caller time to take its reservation and release the lock.
+    time.sleep(0.05)
+    second.wait()
+    elapsed = time.monotonic() - start
+    t.join()
+
+    assert elapsed >= backoff * 0.8
+
+
 def test_rate_limiter_rejects_non_positive_qps():
     with pytest.raises(ValueError):
         _RateLimiter("example.com", qps=0)
