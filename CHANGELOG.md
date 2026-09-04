@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-03
+
 ### Fixed
 
 - Rate limiter no longer sleeps while holding the cross-process file lock.
@@ -35,5 +37,6 @@ Derived from the `http_client.py` module in
 [google-deepmind/science-skills](https://github.com/google-deepmind/science-skills)
 (Apache License 2.0). See [`NOTICE`](NOTICE).
 
-[Unreleased]: https://github.com/doug/polite-http/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/doug/polite-http/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/doug/polite-http/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/doug/polite-http/releases/tag/v0.1.0
