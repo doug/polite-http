@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-10
+
+### Fixed
+
+- Automatic fallback decompression for gzip-compressed responses whose
+  `Content-Encoding: gzip` header was stripped or omitted by intermediate proxies
+  when accessing `HttpResponse.text` or `HttpResponse.json()`.
+- Relaxed rate limiter concurrency assertion in tests to accommodate timer resolution
+  and scheduler variance on Windows CI runners.
+
 ## [0.1.2] - 2026-09-04
 
 ### Changed
@@ -45,7 +55,8 @@ Derived from the `http_client.py` module in
 [google-deepmind/science-skills](https://github.com/google-deepmind/science-skills)
 (Apache License 2.0). See [`NOTICE`](NOTICE).
 
-[Unreleased]: https://github.com/doug/polite-http/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/doug/polite-http/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/doug/polite-http/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/doug/polite-http/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/doug/polite-http/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/doug/polite-http/releases/tag/v0.1.0

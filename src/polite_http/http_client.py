@@ -356,12 +356,19 @@ class HttpResponse:
 
     def json(self) -> Any:
         """Parse the response body as JSON."""
-        return json.loads(self.data.decode(self.encoding))
+        return json.loads(self.text)
 
     @property
     def text(self) -> str:
-        """Decode the response body using the detected charset."""
-        return self.data.decode(self.encoding)
+        """Decode the response body using the detected charset.
+
+        Automatically decompresses gzipped bodies if intermediate proxies stripped
+        the `Content-Encoding: gzip` header.
+        """
+        data = self.data
+        if data[:2] == b"\x1f\x8b":
+            data = gzip.decompress(data)
+        return data.decode(self.encoding)
 
     def __repr__(self) -> str:
         return (

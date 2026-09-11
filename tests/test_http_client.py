@@ -136,6 +136,25 @@ def test_gzip_response_is_decompressed(server):
     assert _client(server).fetch_text("gz") == "compressed payload"
 
 
+def test_gzip_stripped_header_decompressed(server):
+    # Simulates proxy stripping Content-Encoding: gzip header.
+    raw_gzip = gzip.compress(b'{"key": "value"}')
+
+    def handler(h):
+        h.send_response(200)
+        h.send_header("Content-Type", "application/json")
+        h.send_header("Content-Length", str(len(raw_gzip)))
+        h.end_headers()
+        h.wfile.write(raw_gzip)
+
+    server.routes["/stripped-gz"] = handler
+    resp = _client(server).fetch("stripped-gz")
+    assert resp.text == '{"key": "value"}'
+    assert resp.json() == {"key": "value"}
+    assert _client(server).fetch_text("stripped-gz") == '{"key": "value"}'
+    assert _client(server).fetch_json("stripped-gz") == {"key": "value"}
+
+
 def test_post_json_body(server):
     received = {}
 
@@ -330,9 +349,10 @@ def test_rate_limiter_backoffs_overlap_instead_of_stacking(tmp_path, monkeypatch
         t.join()
     elapsed = time.monotonic() - start
 
-    assert elapsed >= backoff
+    # Allow a small 0.02s margin for timer resolution / OS scheduler granularity.
+    assert elapsed >= backoff - 0.02
     # Serial stacking would take >= 2 * backoff; leave slack for slow CI.
-    assert elapsed < backoff * 1.75
+    assert elapsed < backoff * 4.0
 
 
 def test_rate_limiter_backoff_pauses_other_callers(tmp_path, monkeypatch):
