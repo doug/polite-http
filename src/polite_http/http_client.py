@@ -64,6 +64,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import email.utils
+import errno
 import gzip
 import http.client
 import json
@@ -71,6 +72,8 @@ import logging
 import os
 import random
 import re
+import socket
+import ssl
 import sys
 import time
 import urllib.error
@@ -152,6 +155,13 @@ _THROTTLE_BACKPRESSURE: dict[str, float] = {
     "Red": 5.0,
     "Black": 30.0,
 }
+
+# `errno` values for network errors that another attempt is unlikely to fix:
+# the host has no route to the network, or a sandbox or firewall forbids the
+# connection.
+_NON_RETRYABLE_ERRNOS: frozenset[int] = frozenset(
+    {errno.ENETUNREACH, errno.EACCES, errno.EPERM}
+)
 
 
 class _RateLimiter:
@@ -444,6 +454,37 @@ def _parse_throttle_control(headers) -> float:
     return max_delay
 
 
+def _is_retryable_network_error(exc: OSError) -> bool:
+    """Return whether a network-level failure is worth retrying.
+
+    Timeouts, connection resets, refused connections, and dropped connections
+    are usually transient.  DNS failures, unreachable networks, permission
+    errors, and TLS certificate errors usually mean that the environment has no
+    network access (e.g. a sandbox) or that the request is misconfigured.
+    Retrying them only delays the same failure by several minutes of backoff.
+
+    DNS failures include the errors that a sandbox without network access
+    reports, and the system resolver already retries before returning them.
+
+    Args:
+      exc: The exception raised by `urllib.request.urlopen`, excluding
+        `urllib.error.HTTPError`.
+
+    Returns:
+      `True` if the request should be retried.
+    """
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if not isinstance(reason, OSError):
+        # e.g. `URLError("unknown url type: ...")`.
+        return False
+    if isinstance(reason, (socket.gaierror, ssl.SSLCertVerificationError)):
+        return False
+    if isinstance(reason, ssl.SSLError):
+        # `SSLError.errno` holds an OpenSSL code, not an `errno` value.
+        return True
+    return reason.errno not in _NON_RETRYABLE_ERRNOS
+
+
 class HttpClient:
     """Rate-limited HTTP client with automatic retries and backoff.
 
@@ -604,10 +645,12 @@ class HttpClient:
         1. Waits for the rate limiter (cross-process file-lock).
         2. Sends the request via `urllib.request`.
         3. On success (2xx), returns an `HttpResponse`.
-        4. On a retryable HTTP error (429, 5xx) or a network error, sleeps for an
-           exponential backoff delay (with optional jitter and `Retry-After`
-           support) before retrying.
-        5. On a non-retryable HTTP error, raises `HttpError` immediately.
+        4. On a retryable HTTP error (429, 5xx) or a retryable network error
+           (see `_is_retryable_network_error`), sleeps for an exponential
+           backoff delay (with optional jitter and `Retry-After` support)
+           before retrying.
+        5. On a non-retryable HTTP or network error, raises `HttpError`
+           immediately.
 
         Args:
           url: Request URL.
@@ -804,7 +847,7 @@ class HttpClient:
                     url=url,
                 ) from exc
             except (urllib.error.URLError, OSError) as exc:
-                if attempt < effective_retries:
+                if _is_retryable_network_error(exc) and attempt < effective_retries:
                     next_min_sleep = self._compute_backoff(attempt)
                     logging.info(
                         "HttpClient[%s]: Network error (%s) — retrying in ≥%.1fs"

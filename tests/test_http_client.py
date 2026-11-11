@@ -20,10 +20,16 @@ runs fully offline.
 
 from __future__ import annotations
 
+import errno
 import gzip
+import http.client
 import json
+import socket
+import ssl
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -202,6 +208,101 @@ def test_retries_exhausted_raises(server):
     with pytest.raises(HttpError) as exc_info:
         client.fetch("always500")
     assert exc_info.value.status_code == 500
+
+
+def _patch_urlopen_to_raise(monkeypatch, exc):
+    """Make `urlopen` raise *exc* and return a list recording each call."""
+    calls = []
+
+    def fake_urlopen(*args, **kwargs):
+        calls.append(args)
+        raise exc
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(
+            urllib.error.URLError(
+                socket.gaierror(
+                    socket.EAI_AGAIN, "Temporary failure in name resolution"
+                )
+            ),
+            id="dns_eai_again",
+        ),
+        pytest.param(
+            urllib.error.URLError(
+                socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+            ),
+            id="dns_eai_noname",
+        ),
+        pytest.param(
+            urllib.error.URLError(OSError(errno.ENETUNREACH, "Network is unreachable")),
+            id="network_unreachable",
+        ),
+        pytest.param(
+            urllib.error.URLError(
+                PermissionError(errno.EPERM, "Operation not permitted")
+            ),
+            id="permission_denied",
+        ),
+        pytest.param(
+            urllib.error.URLError(
+                ssl.SSLCertVerificationError(1, "certificate verify failed")
+            ),
+            id="tls_cert_verification",
+        ),
+        pytest.param(
+            urllib.error.URLError("unknown url type: foo"), id="non_oserror_reason"
+        ),
+    ],
+)
+def test_persistent_network_error_is_not_retried(server, monkeypatch, exc):
+    calls = _patch_urlopen_to_raise(monkeypatch, exc)
+    client = _client(server, max_retries=5)
+    with pytest.raises(HttpError) as exc_info:
+        client.fetch("x")
+    assert len(calls) == 1
+    assert exc_info.value.status_code is None
+    assert exc_info.value.__cause__ is exc
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(TimeoutError("timed out"), id="timeout"),
+        pytest.param(
+            urllib.error.URLError(TimeoutError("timed out")), id="wrapped_timeout"
+        ),
+        pytest.param(
+            ConnectionResetError(errno.ECONNRESET, "Connection reset by peer"),
+            id="connection_reset",
+        ),
+        pytest.param(
+            urllib.error.URLError(
+                ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
+            ),
+            id="connection_refused",
+        ),
+        pytest.param(
+            http.client.RemoteDisconnected("Remote end closed connection"),
+            id="remote_disconnected",
+        ),
+        pytest.param(
+            urllib.error.URLError(ssl.SSLEOFError(8, "EOF occurred")),
+            id="tls_eof",
+        ),
+    ],
+)
+def test_transient_network_error_is_retried(server, monkeypatch, exc):
+    calls = _patch_urlopen_to_raise(monkeypatch, exc)
+    client = _client(server, max_retries=2)
+    with pytest.raises(HttpError):
+        client.fetch("x")
+    assert len(calls) == 3
 
 
 def test_http_error_json_body():

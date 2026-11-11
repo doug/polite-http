@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Network errors that are unlikely to be transient (DNS failures, unreachable
+  networks, permission errors, TLS certificate errors, and invalid URLs) now
+  raise `HttpError` immediately instead of retrying with backoff for several
+  minutes, e.g. when running in a sandbox without network access.
+
 ## [0.1.3] - 2026-09-10
 
 ### Fixed
