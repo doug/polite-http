@@ -9,7 +9,8 @@ A courteous, **dependency-free** HTTP client for Python. It plays nice with
 rate-limited APIs out of the box:
 
 - **Per-host rate limiting** — cross-process, via a shared file lock.
-- **Automatic retries** on transient errors (HTTP 429, 5xx) and network errors.
+- **Automatic retries** on transient errors (HTTP 429, 5xx) and transient
+  network errors (e.g. timeouts and connection resets).
 - **Exponential backoff** with optional jitter.
 - **`Retry-After`** support (server-directed backoff, both seconds and
   HTTP-date forms).
@@ -95,7 +96,8 @@ with open("paper.pdf", "wb") as f:
 ## Error handling
 
 Failed requests raise `HttpError`, which carries the `status_code`, raw `body`
-bytes, and `url`:
+bytes, and `url`. The raw body may be gzip-compressed; `text` and `json()`
+decompress and decode it for you:
 
 ```python
 from polite_http import HttpClient, HttpError
@@ -104,7 +106,7 @@ client = HttpClient("https://api.example.com/", qps=5)
 try:
     data = client.fetch_json("widgets/42")
 except HttpError as exc:
-    print(exc.status_code, exc.url)
+    print(exc.status_code, exc.url, exc.text)
     if exc.body:
         print(exc.json())  # parse the error body as JSON, if applicable
 ```

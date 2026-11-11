@@ -64,6 +64,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import email.utils
+import errno
 import gzip
 import http.client
 import json
@@ -71,11 +72,14 @@ import logging
 import os
 import random
 import re
+import socket
+import ssl
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from collections.abc import Iterator
 from typing import Any
 
@@ -152,6 +156,13 @@ _THROTTLE_BACKPRESSURE: dict[str, float] = {
     "Red": 5.0,
     "Black": 30.0,
 }
+
+# `errno` values for network errors that another attempt is unlikely to fix:
+# the host has no route to the network, or a sandbox or firewall forbids the
+# connection.
+_NON_RETRYABLE_ERRNOS: frozenset[int] = frozenset(
+    {errno.ENETUNREACH, errno.EACCES, errno.EPERM}
+)
 
 
 class _RateLimiter:
@@ -274,12 +285,35 @@ def _maybe_decompress(
     return response
 
 
+def _gunzip_if_needed(data: bytes) -> bytes | None:
+    """Decompress *data* if it starts with the gzip magic number.
+
+    Sniffing the magic number (rather than trusting `Content-Encoding`) also
+    covers proxies that strip the header.
+
+    Args:
+      data: Possibly gzip-compressed bytes.
+
+    Returns:
+      The decompressed bytes, *data* unchanged if it is not gzip-compressed, or
+      `None` if it looks gzip-compressed but is truncated or corrupt.
+    """
+    if not data.startswith(b"\x1f\x8b"):
+        return data
+    try:
+        return gzip.decompress(data)
+    except (OSError, EOFError, zlib.error):  # gzip.BadGzipFile is an OSError.
+        return None
+
+
 class HttpError(Exception):
     """Raised when an HTTP request fails with a non-retryable or exhausted error.
 
     Attributes:
       status_code: HTTP status code (`None` for network-level failures).
-      body: Raw error response body bytes, if available.
+      body: Raw error response body bytes, if available.  These may be
+        gzip-compressed, since requests send `Accept-Encoding: gzip`; use `text`
+        or `json()` to read the decoded body.
       url: The URL that was requested.
     """
 
@@ -303,21 +337,31 @@ class HttpError(Exception):
         self.url = url
 
     def json(self) -> Any:
-        """Attempt to parse the error body as JSON."""
+        """Attempt to parse the error body as JSON, decompressing it if needed."""
         # Let the JSON decode fail with JSONDecodeError if the body is empty.
+        return json.loads(self.text)
+
+    @property
+    def text(self) -> str:
+        """Decode the error body as UTF-8, decompressing gzipped bodies first.
+
+        Never raises: undecodable bytes are replaced, and a body that looks
+        gzip-compressed but is corrupt is decoded as-is.
+        """
         body = self.body or b""
-        return json.loads(body.decode("utf-8"))
+        decompressed = _gunzip_if_needed(body)
+        if decompressed is not None:
+            body = decompressed
+        return body.decode("utf-8", errors="replace")
 
     @classmethod
     def _summarize_body(cls, body: bytes | None) -> str | None:
         """Return a short summary of the error body if available."""
         if not body:
             return None
-        if body.startswith(b"\x1f\x8b"):  # Gzip encoding.
-            try:
-                body = gzip.decompress(body)
-            except gzip.BadGzipFile:
-                return None
+        body = _gunzip_if_needed(body)
+        if body is None:
+            return None
 
         decoded = body.decode("utf-8", errors="replace").strip()
         if len(decoded) > cls.MAX_BODY_SUMMARY_LEN:
@@ -442,6 +486,37 @@ def _parse_throttle_control(headers) -> float:
         if delay > max_delay:
             max_delay = delay
     return max_delay
+
+
+def _is_retryable_network_error(exc: OSError) -> bool:
+    """Return whether a network-level failure is worth retrying.
+
+    Timeouts, connection resets, refused connections, and dropped connections
+    are usually transient.  DNS failures, unreachable networks, permission
+    errors, and TLS certificate errors usually mean that the environment has no
+    network access (e.g. a sandbox) or that the request is misconfigured.
+    Retrying them only delays the same failure by several minutes of backoff.
+
+    DNS failures include the errors that a sandbox without network access
+    reports, and the system resolver already retries before returning them.
+
+    Args:
+      exc: The exception raised by `urllib.request.urlopen`, excluding
+        `urllib.error.HTTPError`.
+
+    Returns:
+      `True` if the request should be retried.
+    """
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if not isinstance(reason, OSError):
+        # e.g. `URLError("unknown url type: ...")`.
+        return False
+    if isinstance(reason, (socket.gaierror, ssl.SSLCertVerificationError)):
+        return False
+    if isinstance(reason, ssl.SSLError):
+        # `SSLError.errno` holds an OpenSSL code, not an `errno` value.
+        return True
+    return reason.errno not in _NON_RETRYABLE_ERRNOS
 
 
 class HttpClient:
@@ -604,10 +679,12 @@ class HttpClient:
         1. Waits for the rate limiter (cross-process file-lock).
         2. Sends the request via `urllib.request`.
         3. On success (2xx), returns an `HttpResponse`.
-        4. On a retryable HTTP error (429, 5xx) or a network error, sleeps for an
-           exponential backoff delay (with optional jitter and `Retry-After`
-           support) before retrying.
-        5. On a non-retryable HTTP error, raises `HttpError` immediately.
+        4. On a retryable HTTP error (429, 5xx) or a retryable network error
+           (see `_is_retryable_network_error`), sleeps for an exponential
+           backoff delay (with optional jitter and `Retry-After` support)
+           before retrying.
+        5. On a non-retryable HTTP or network error, raises `HttpError`
+           immediately.
 
         Args:
           url: Request URL.
@@ -804,7 +881,7 @@ class HttpClient:
                     url=url,
                 ) from exc
             except (urllib.error.URLError, OSError) as exc:
-                if attempt < effective_retries:
+                if _is_retryable_network_error(exc) and attempt < effective_retries:
                     next_min_sleep = self._compute_backoff(attempt)
                     logging.info(
                         "HttpClient[%s]: Network error (%s) — retrying in ≥%.1fs"
