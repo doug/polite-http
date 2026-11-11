@@ -79,6 +79,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from collections.abc import Iterator
 from typing import Any
 
@@ -284,12 +285,35 @@ def _maybe_decompress(
     return response
 
 
+def _gunzip_if_needed(data: bytes) -> bytes | None:
+    """Decompress *data* if it starts with the gzip magic number.
+
+    Sniffing the magic number (rather than trusting `Content-Encoding`) also
+    covers proxies that strip the header.
+
+    Args:
+      data: Possibly gzip-compressed bytes.
+
+    Returns:
+      The decompressed bytes, *data* unchanged if it is not gzip-compressed, or
+      `None` if it looks gzip-compressed but is truncated or corrupt.
+    """
+    if not data.startswith(b"\x1f\x8b"):
+        return data
+    try:
+        return gzip.decompress(data)
+    except (OSError, EOFError, zlib.error):  # gzip.BadGzipFile is an OSError.
+        return None
+
+
 class HttpError(Exception):
     """Raised when an HTTP request fails with a non-retryable or exhausted error.
 
     Attributes:
       status_code: HTTP status code (`None` for network-level failures).
-      body: Raw error response body bytes, if available.
+      body: Raw error response body bytes, if available.  These may be
+        gzip-compressed, since requests send `Accept-Encoding: gzip`; use `text`
+        or `json()` to read the decoded body.
       url: The URL that was requested.
     """
 
@@ -313,21 +337,31 @@ class HttpError(Exception):
         self.url = url
 
     def json(self) -> Any:
-        """Attempt to parse the error body as JSON."""
+        """Attempt to parse the error body as JSON, decompressing it if needed."""
         # Let the JSON decode fail with JSONDecodeError if the body is empty.
+        return json.loads(self.text)
+
+    @property
+    def text(self) -> str:
+        """Decode the error body as UTF-8, decompressing gzipped bodies first.
+
+        Never raises: undecodable bytes are replaced, and a body that looks
+        gzip-compressed but is corrupt is decoded as-is.
+        """
         body = self.body or b""
-        return json.loads(body.decode("utf-8"))
+        decompressed = _gunzip_if_needed(body)
+        if decompressed is not None:
+            body = decompressed
+        return body.decode("utf-8", errors="replace")
 
     @classmethod
     def _summarize_body(cls, body: bytes | None) -> str | None:
         """Return a short summary of the error body if available."""
         if not body:
             return None
-        if body.startswith(b"\x1f\x8b"):  # Gzip encoding.
-            try:
-                body = gzip.decompress(body)
-            except gzip.BadGzipFile:
-                return None
+        body = _gunzip_if_needed(body)
+        if body is None:
+            return None
 
         decoded = body.decode("utf-8", errors="replace").strip()
         if len(decoded) > cls.MAX_BODY_SUMMARY_LEN:

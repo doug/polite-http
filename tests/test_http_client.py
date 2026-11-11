@@ -310,6 +310,39 @@ def test_http_error_json_body():
     assert err.json() == {"error": "bad"}
 
 
+def test_http_error_text():
+    assert HttpError("oops", status_code=400, body=b"nope").text == "nope"
+    assert HttpError("oops", status_code=400).text == ""
+
+
+def test_http_error_gzip_body_is_decompressed():
+    err = HttpError("oops", status_code=400, body=gzip.compress(b'{"error": "bad"}'))
+    assert err.text == '{"error": "bad"}'
+    assert err.json() == {"error": "bad"}
+    assert str(err) == 'oops\nServer body: {"error": "bad"}'
+
+
+def test_http_error_truncated_gzip_body():
+    truncated = gzip.compress(b'{"error": "bad"}')[:-4]
+    err = HttpError("oops", status_code=400, body=truncated)
+    assert str(err) == "oops"  # No summary for an undecodable body.
+    assert err.body == truncated
+    assert isinstance(err.text, str)
+    with pytest.raises(ValueError):
+        err.json()
+
+
+def test_gzip_error_response_is_decoded(server):
+    server.routes["/gz-error"] = lambda h: _respond(
+        h, 400, json.dumps({"error": "bad"}), gzip_body=True
+    )
+    with pytest.raises(HttpError) as exc_info:
+        _client(server).fetch("gz-error")
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.text == '{"error": "bad"}'
+    assert exc_info.value.json() == {"error": "bad"}
+
+
 def test_stream_lines(server):
     payload = "alpha\nbeta\ngamma\n"
     server.routes["/lines"] = lambda h: _respond(h, 200, payload)

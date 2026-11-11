@@ -96,7 +96,8 @@ with open("paper.pdf", "wb") as f:
 ## Error handling
 
 Failed requests raise `HttpError`, which carries the `status_code`, raw `body`
-bytes, and `url`:
+bytes, and `url`. The raw body may be gzip-compressed; `text` and `json()`
+decompress and decode it for you:
 
 ```python
 from polite_http import HttpClient, HttpError
@@ -105,7 +106,7 @@ client = HttpClient("https://api.example.com/", qps=5)
 try:
     data = client.fetch_json("widgets/42")
 except HttpError as exc:
-    print(exc.status_code, exc.url)
+    print(exc.status_code, exc.url, exc.text)
     if exc.body:
         print(exc.json())  # parse the error body as JSON, if applicable
 ```
